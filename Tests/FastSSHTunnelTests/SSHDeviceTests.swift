@@ -20,7 +20,7 @@ struct SSHDeviceTests {
     }
 
     @Test func effectiveSSHConfigurationUsesSOCKSAndSeparateDeviceCredentials() throws {
-        let device = SSHDevice(host: "router.internal", username: "device-admin", port: 2222)
+        let device = SSHDevice(host: "router.internal", username: " \u{FEFF}device-admin\u{200B}\n", port: 2222)
         let arguments = try SSHDeviceConfiguration.arguments(for: device, socksPort: 1087)
         let result = try run("/usr/bin/ssh", arguments: ["-G"] + arguments)
         #expect(result.status == 0)
@@ -49,11 +49,16 @@ struct SSHDeviceTests {
                 try SSHDeviceConfiguration.arguments(for: SSHDevice(host: "router.internal", username: "admin"), socksPort: port)
             }
         }
-        #expect(throws: SSHDeviceError.self) {
-            try SSHDeviceConfiguration.arguments(for: SSHDevice(host: "router.internal", username: ""), socksPort: 1080)
-        }
         let ipv6 = try SSHDeviceConfiguration.arguments(for: SSHDevice(host: "fd00::10", username: "admin"), socksPort: 1080)
         #expect(ipv6.last == "fd00::10")
+    }
+
+    @Test func rejectsMissingUsernamesAndEmbeddedControlCharacters() {
+        for username in ["", " \u{FEFF}\u{200B}\n", "device\u{200B}admin", "device\u{0000}admin"] {
+            #expect(throws: SSHDeviceError.self) {
+                try SSHDeviceConfiguration.arguments(for: SSHDevice(host: "router.internal", username: username), socksPort: 1080)
+            }
+        }
     }
 
     @Test func terminalCommandPreservesLiteralArgumentsWithoutShellExpansion() throws {

@@ -1357,7 +1357,7 @@ struct TunnelDetailView: View {
                             .modifier(EditableFieldStyle())
                     }
                     LabeledContent("Device username") {
-                        TextField("Device username", text: sshDevice.username, prompt: Text("admin"))
+                        TextField("Device username", text: sshDevice.username, prompt: Text("Enter device SSH username"))
                             .modifier(EditableFieldStyle())
                     }
                     LabeledContent("Device SSH port") {
@@ -1398,6 +1398,9 @@ struct TunnelDetailView: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .layoutPriority(1)
         }
+        // Let the split view size the detail pane to the window, even when the
+        // status text or save bar asks for extra height at a narrow width.
+        .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
         .task(id: PasswordIdentity(profile)) {
             await store.loadCredential(for: profile)
         }
@@ -1534,7 +1537,10 @@ struct TunnelDetailView: View {
     private var sshDevice: Binding<SSHDevice> {
         Binding(
             get: { profile.sshDevice ?? SSHDevice() },
-            set: { profile.sshDevice = $0 }
+            set: {
+                profile.sshDevice = $0
+                sshLaunchError = nil
+            }
         )
     }
 

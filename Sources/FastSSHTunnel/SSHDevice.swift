@@ -16,9 +16,13 @@ struct SSHDeviceError: LocalizedError {
 }
 
 enum SSHDeviceConfiguration {
+    // A copied username can include a zero-width space or byte order mark at its edges.
+    private static let usernamePadding = CharacterSet.whitespacesAndNewlines
+        .union(CharacterSet(charactersIn: "\u{200B}\u{FEFF}"))
+
     static func arguments(for device: SSHDevice, socksPort: Int) throws -> [String] {
         let host = device.host.trimmingCharacters(in: .whitespacesAndNewlines)
-        let username = device.username.trimmingCharacters(in: .whitespacesAndNewlines)
+        let username = device.username.trimmingCharacters(in: usernamePadding)
         guard !host.isEmpty else { throw SSHDeviceError("Enter the device's host or IP address.") }
         // OpenSSH substitutes the host into a shell-based ProxyCommand. Restrict
         // it to literal DNS/IP characters, including IPv6, before that happens.
@@ -26,8 +30,9 @@ enum SSHDeviceConfiguration {
         guard !host.hasPrefix("-"), host.unicodeScalars.allSatisfy(hostCharacters.contains) else {
             throw SSHDeviceError("Use a hostname or IP address without spaces, brackets, or shell characters.")
         }
-        guard !username.isEmpty, !username.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
-            throw SSHDeviceError("Enter the device's SSH username without control characters.")
+        guard !username.isEmpty else { throw SSHDeviceError("Enter the device's SSH username.") }
+        guard !username.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
+            throw SSHDeviceError("The device's SSH username contains invisible control characters. Retype the username and try again.")
         }
         guard (1...65535).contains(device.port) else {
             throw SSHDeviceError("Device SSH port must be between 1 and 65535.")
