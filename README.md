@@ -2,6 +2,8 @@
 
 A native macOS SSH tunnel manager. Save multiple SSH profiles, browse in Firefox through a SOCKS tunnel, and optionally forward a local port to a Windows PC for Remote Desktop.
 
+![FastSSHTunnel on macOS with an example SSH tunnel and its Static Port settings](updated-app-preview.png)
+
 Use **Save Connection** at the bottom of a connection's settings (or **⌘S**)
 to save it and see a confirmation. Edits also continue to save automatically.
 Connection details are organized into **Connection**, **Authentication**,
