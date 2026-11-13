@@ -29,7 +29,7 @@ struct SSHDeviceTests {
         #expect(lines.contains("user device-admin"))
         #expect(lines.contains("port 2222"))
         #expect(lines.contains("batchmode no"))
-        #expect(lines.contains("stricthostkeychecking accept-new"))
+        #expect(lines.contains("stricthostkeychecking ask"))
         #expect(lines.contains("controlmaster false"))
         #expect(!lines.contains(where: { $0.hasPrefix("controlpath ") }))
         #expect(lines.contains("proxycommand /usr/bin/nc -X 5 -x 127.0.0.1:1087 '%h' '%p'"))

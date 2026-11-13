@@ -13,10 +13,14 @@ enum SSHConfiguration {
             "-o", "ConnectTimeout=15",
             "-o", "ServerAliveInterval=30",
             "-o", "ServerAliveCountMax=3",
-            // Accept and remember first-use keys without a prompt. OpenSSH still
-            // rejects changed keys for hosts that are already known.
-            "-o", "StrictHostKeyChecking=accept-new",
-            "-o", "BatchMode=\(usesPassword ? "no" : "yes")",
+            // Keep every listener owned by this process so Disconnect and Quit can stop it.
+            "-o", "ControlPath=none",
+            "-o", "ForkAfterAuthentication=no",
+            "-o", "StrictHostKeyChecking=ask",
+            "-o", "VerifyHostKeyDNS=no",
+            "-o", "FingerprintHash=sha256",
+            // Batch mode would reject new keys without calling the prompt helper.
+            "-o", "BatchMode=no",
             "-o", "PermitLocalCommand=yes",
             // This fixed local command runs only after authentication and forwarding
             // setup succeed. The marker contains only a generated UUID, never user input.
@@ -29,13 +33,7 @@ enum SSHConfiguration {
             arguments += ["-L", staticPort.forwardingArgument]
         }
         if profile.enabledRemoteDesktop != nil || profile.enabledStaticPort != nil {
-            arguments += [
-                // Keep the listener owned by this process until Disconnect,
-                // even when the user's SSH config enables connection sharing.
-                "-o", "ControlPath=none",
-                "-o", "ForkAfterAuthentication=no",
-                "-o", "ClearAllForwardings=no"
-            ]
+            arguments += ["-o", "ClearAllForwardings=no"]
         }
         if usesPassword {
             arguments += [
@@ -43,6 +41,12 @@ enum SSHConfiguration {
                 "-o", "PasswordAuthentication=yes",
                 "-o", "KbdInteractiveAuthentication=yes",
                 "-o", "NumberOfPasswordPrompts=1"
+            ]
+        } else {
+            arguments += [
+                "-o", "PasswordAuthentication=no",
+                "-o", "KbdInteractiveAuthentication=no",
+                "-o", "NumberOfPasswordPrompts=0"
             ]
         }
         if !profile.identityFile.isEmpty { arguments += ["-i", profile.identityFile] }

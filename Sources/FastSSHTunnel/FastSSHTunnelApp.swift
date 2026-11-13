@@ -7,7 +7,7 @@ import UniformTypeIdentifiers
 @main
 struct FastSSHTunnelApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @StateObject private var store = TunnelStore()
+    @MainActor private var store: TunnelStore { appDelegate.tunnelStore }
 
     var body: some Scene {
         Window("FastSSHTunnel", id: AppDelegate.mainWindowID) {
@@ -46,11 +46,16 @@ struct FastSSHTunnelApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     static let mainWindowID = "main"
+    private(set) lazy var tunnelStore = TunnelStore()
     var openMainWindow: (() -> Void)?
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         // Closing the UI must not tear down the shared tunnel store or its SSH processes.
         false
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        tunnelStore.disconnectAllForQuit()
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -219,10 +224,11 @@ final class TunnelStore: ObservableObject {
     private var processes: [UUID: Process] = [:]
     private var activeProfiles: [UUID: TunnelProfile] = [:]
     private var outputHandles: [UUID: [Any]] = [:]
-    private var passwordBrokers: [UUID: SSHPasswordBroker] = [:]
+    private var askpassBrokers: [UUID: SSHAskpassBroker] = [:]
     private var outputBuffers: [UUID: String] = [:]
     private var trafficMonitors: [UUID: TunnelTrafficMonitor] = [:]
     private var isPreview = false
+    private var isQuitting = false
     private var savingCredentials = 0
 
     init() {
@@ -481,6 +487,7 @@ final class TunnelStore: ObservableObject {
     }
 
     func connect(_ profile: TunnelProfile) {
+        guard !isQuitting else { return }
         guard !isPreview else {
             notices[profile.id] = "This is a design preview. Run the app to connect a tunnel."
             return
@@ -507,16 +514,27 @@ final class TunnelStore: ObservableObject {
     }
 
     func disconnect(_ profile: TunnelProfile) {
-        if !isPreview { DebugLog.shared.record(.disconnected, profileID: profile.id) }
-        stopTrafficMonitoring(for: profile.id)
-        processes[profile.id]?.terminate()
-        processes[profile.id] = nil
-        activeProfiles[profile.id] = nil
-        outputHandles[profile.id] = nil
-        passwordBrokers.removeValue(forKey: profile.id)?.stop()
-        outputBuffers[profile.id] = nil
-        states[profile.id] = .disconnected
-        notices[profile.id] = "Tunnel stopped."
+        disconnect(profileID: profile.id)
+    }
+
+    func disconnectAllForQuit() {
+        isQuitting = true
+        // Keep a snapshot so Quit also waits for tunnels already disconnecting.
+        let ownedProcesses = processes
+        for profileID in ownedProcesses.keys { disconnect(profileID: profileID) }
+        for process in ownedProcesses.values { process.waitUntilExit() }
+    }
+
+    private func disconnect(profileID: UUID) {
+        if !isPreview { DebugLog.shared.record(.disconnected, profileID: profileID) }
+        stopTrafficMonitoring(for: profileID)
+        activeProfiles[profileID] = nil
+        outputHandles[profileID] = nil
+        askpassBrokers.removeValue(forKey: profileID)?.stop()
+        outputBuffers[profileID] = nil
+        states[profileID] = .disconnected
+        notices[profileID] = "Tunnel stopped."
+        if let process = processes[profileID], process.isRunning { process.terminate() }
     }
 
     func openInFirefox(_ profile: TunnelProfile) {
@@ -627,17 +645,31 @@ final class TunnelStore: ObservableObject {
         process.standardOutput = pipe
         process.standardError = pipe
         process.arguments = SSHConfiguration.arguments(for: profile, usesPassword: !password.isEmpty, readyMarker: readyMarker)
-        if !password.isEmpty {
-            do {
-                let broker = try SSHPasswordBroker(password: password)
-                passwordBrokers[profile.id] = broker
-                process.environment = ProcessInfo.processInfo.environment.merging(broker.environment) { _, new in new }
-            } catch {
-                DebugLog.shared.record(.passwordSetupFailed, profileID: profile.id)
-                states[profile.id] = .failed(error.localizedDescription)
-                notices[profile.id] = "Could not prepare password authentication: \(error.localizedDescription)"
-                return
+        do {
+            let broker = try SSHAskpassBroker(password: password) { [weak self, weak process] key in
+                guard let self, let process, self.processes[profile.id] === process, process.isRunning else { return false }
+                let alert = NSAlert()
+                alert.alertStyle = .warning
+                alert.messageText = "Trust this SSH server?"
+                alert.informativeText = """
+                OpenSSH has not seen this host key for \(key.host).
+
+                Host key fingerprint
+                \(key.fingerprint)
+
+                Compare this fingerprint with one from your server administrator before trusting it. An impersonator could receive your SSH password if you trust the wrong key.
+                """
+                alert.addButton(withTitle: "Cancel")
+                alert.addButton(withTitle: "Trust and Connect")
+                return alert.runModal() == .alertSecondButtonReturn
             }
+            askpassBrokers[profile.id] = broker
+            process.environment = ProcessInfo.processInfo.environment.merging(broker.environment) { _, new in new }
+        } catch {
+            DebugLog.shared.record(.sshPromptSetupFailed, profileID: profile.id)
+            states[profile.id] = .failed(error.localizedDescription)
+            notices[profile.id] = "Could not prepare SSH prompts: \(error.localizedDescription)"
+            return
         }
         outputBuffers[profile.id] = ""
         states[profile.id] = .connecting
@@ -664,11 +696,11 @@ final class TunnelStore: ObservableObject {
                 DebugLog.shared.record(.sshExited(finishedProcess.terminationStatus), profileID: profile.id)
                 self.stopTrafficMonitoring(for: profile.id)
                 self.processes[profile.id] = nil
-                self.activeProfiles[profile.id] = nil
+                let wasActive = self.activeProfiles.removeValue(forKey: profile.id) != nil
                 self.outputHandles[profile.id] = nil
-                self.passwordBrokers.removeValue(forKey: profile.id)?.stop()
+                self.askpassBrokers.removeValue(forKey: profile.id)?.stop()
                 self.outputBuffers[profile.id] = nil
-                if self.states[profile.id] != .disconnected {
+                if wasActive {
                     self.states[profile.id] = .failed("SSH exited with status \(finishedProcess.terminationStatus).")
                     if self.notices[profile.id] == "Starting SSH tunnel…" || self.notices[profile.id]?.hasPrefix("Tunnel connected at") == true {
                         self.notices[profile.id] = "SSH exited with status \(finishedProcess.terminationStatus)."
@@ -679,11 +711,11 @@ final class TunnelStore: ObservableObject {
 
         do {
             try process.run()
-            passwordBrokers[profile.id]?.authorize(processID: process.processIdentifier)
+            askpassBrokers[profile.id]?.authorize(processID: process.processIdentifier)
             processes[profile.id] = process
             activeProfiles[profile.id] = profile
         } catch {
-            passwordBrokers.removeValue(forKey: profile.id)?.stop()
+            askpassBrokers.removeValue(forKey: profile.id)?.stop()
             outputBuffers[profile.id] = nil
             DebugLog.shared.record(.sshLaunchFailed, profileID: profile.id)
             states[profile.id] = .failed(error.localizedDescription)
@@ -692,7 +724,7 @@ final class TunnelStore: ObservableObject {
     }
 
     private func handleSSHOutput(_ text: String, profile: TunnelProfile, process: Process, readyMarker: String) {
-        guard processes[profile.id] === process else { return }
+        guard processes[profile.id] === process, activeProfiles[profile.id] != nil else { return }
         let combined = (outputBuffers[profile.id] ?? "") + text
         var lines = combined.components(separatedBy: "\n")
         outputBuffers[profile.id] = String((lines.removeLast()).suffix(4096))
@@ -702,7 +734,7 @@ final class TunnelStore: ObservableObject {
                 DebugLog.shared.record(.connected, profileID: profile.id)
                 states[profile.id] = .connected
                 notices[profile.id] = "Tunnel connected at socks5://127.0.0.1:\(profile.socksPort)"
-                passwordBrokers.removeValue(forKey: profile.id)?.stop()
+                askpassBrokers.removeValue(forKey: profile.id)?.stop()
                 startTrafficMonitoring(for: profile, process: process)
             } else if !message.isEmpty {
                 DebugLog.shared.record(.sshDiagnostic(.classify(message)), profileID: profile.id)

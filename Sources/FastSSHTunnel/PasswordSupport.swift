@@ -71,25 +71,54 @@ enum PasswordKeychain {
     }
 }
 
+struct SSHHostKeyPrompt: Sendable {
+    static let prefix = "The authenticity of host '"
+
+    let host: String
+    let fingerprint: String
+
+    init?(_ prompt: String) {
+        let fingerprintLabel = " key fingerprint is: "
+        let lines = prompt.components(separatedBy: "\n")
+        guard let first = lines.first, first.hasPrefix(Self.prefix),
+              let hostEnd = first.range(of: "' can't be established"),
+              lines.last?.trimmingCharacters(in: .whitespaces) == "Are you sure you want to continue connecting (yes/no/[fingerprint])?",
+              let fingerprintLine = lines.dropFirst().first(where: { $0.contains(fingerprintLabel) }),
+              let fingerprintStart = fingerprintLine.range(of: fingerprintLabel) else { return nil }
+
+        let hostStart = first.index(first.startIndex, offsetBy: Self.prefix.count)
+        guard hostStart < hostEnd.lowerBound else { return nil }
+        let host = first[hostStart..<hostEnd.lowerBound]
+        let fingerprint = fingerprintLine[fingerprintStart.upperBound...]
+        guard !host.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
+              fingerprint.hasPrefix("SHA256:"), fingerprint.utf8.count == 50,
+              Data(base64Encoded: String(fingerprint.dropFirst("SHA256:".count)) + "=")?.count == 32 else { return nil }
+        self.host = String(host)
+        self.fingerprint = String(fingerprint)
+    }
+}
+
 /// Supplies SSH_ASKPASS responses over a protected local socket. The password
 /// never appears in the helper script, command arguments, environment, or files.
-final class SSHPasswordBroker {
+final class SSHAskpassBroker: @unchecked Sendable {
     let directory: URL
     let helperURL: URL
     let environment: [String: String]
-    private let password: Data
+    private let password: Data?
+    private let confirmHostKey: @MainActor @Sendable (SSHHostKeyPrompt) -> Bool
     private let token = UUID().uuidString
     private let source: DispatchSourceRead
     private let lock = NSCondition()
     private var stopped = false
     private var sshProcessID: Int32?
 
-    init(password: String) throws {
+    init(password: String, confirmHostKey: @escaping @MainActor @Sendable (SSHHostKeyPrompt) -> Bool = { _ in false }) throws {
         // Keep the Unix socket path below sockaddr_un's 104-byte limit.
         directory = URL(fileURLWithPath: "/private/tmp/fastssh-\(UUID().uuidString)", isDirectory: true)
         helperURL = directory.appendingPathComponent("askpass")
         let socketURL = directory.appendingPathComponent("socket")
-        self.password = Data((password + "\n").utf8)
+        self.password = password.isEmpty ? nil : Data((password + "\n").utf8)
+        self.confirmHostKey = confirmHostKey
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         let descriptor = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard descriptor >= 0 else {
@@ -119,12 +148,8 @@ final class SSHPasswordBroker {
             }
             let script = """
             #!/bin/sh
-            # Refuse host-key confirmations, key passphrases, and unrelated challenges.
-            case "$1" in
-                *[Pp]assword:*) ;;
-                *) exit 1 ;;
-            esac
-            response=$(printf '%s %s\\n' "$FASTSSH_ASKPASS_TOKEN" "$PPID" | /usr/bin/nc -w 3 -U "$FASTSSH_ASKPASS_SOCKET") || exit 1
+            [ "${SSH_ASKPASS_PROMPT-}" != none ] || exit 1
+            response=$(printf '%s %s\\n%s\\000' "$FASTSSH_ASKPASS_TOKEN" "$PPID" "$1" | /usr/bin/nc -U "$FASTSSH_ASKPASS_SOCKET") || exit 1
             [ -n "$response" ] || exit 1
             printf '%s\\n' "$response"
             """
@@ -138,6 +163,7 @@ final class SSHPasswordBroker {
         environment = [
             "SSH_ASKPASS": helperURL.path,
             "SSH_ASKPASS_REQUIRE": "force",
+            "SSH_ASKPASS_PROMPT": "",
             "FASTSSH_ASKPASS_SOCKET": socketURL.path,
             "FASTSSH_ASKPASS_TOKEN": token
         ]
@@ -170,7 +196,8 @@ final class SSHPasswordBroker {
     private func respond(on listener: Int32) {
         let client = Darwin.accept(listener, nil, nil)
         guard client >= 0 else { return }
-        defer { Darwin.close(client) }
+        var closeClient = true
+        defer { if closeClient { Darwin.close(client) } }
         // Accepted sockets must use blocking reads with the bounded timeout below.
         guard Darwin.fcntl(client, F_SETFL, 0) == 0 else { return }
         var timeout = timeval(tv_sec: 2, tv_usec: 0)
@@ -178,25 +205,56 @@ final class SSHPasswordBroker {
         _ = Darwin.setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
         _ = Darwin.setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
         _ = Darwin.setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, socklen_t(MemoryLayout<Int32>.size))
+        guard let request = readRequest(from: client), let headerEnd = request.firstIndex(of: "\n") else { return }
+        let header = request[..<headerEnd].split(separator: " ")
+        guard header.count == 2, header[0] == token, let parentID = Int32(header[1]),
+              isAuthorized(parentID, waitForLaunch: true) else { return }
+        let prompt = String(request[request.index(after: headerEnd)...])
+        if prompt.hasPrefix(SSHHostKeyPrompt.prefix) {
+            guard let key = SSHHostKeyPrompt(prompt) else { return }
+            closeClient = false
+            Task { @MainActor [weak self] in
+                defer { Darwin.close(client) }
+                guard let self, self.isAuthorized(parentID) else { return }
+                let answer = self.confirmHostKey(key) ? key.fingerprint : "no"
+                guard self.isAuthorized(parentID) else { return }
+                Self.send(Data((answer + "\n").utf8), to: client)
+            }
+        } else if let password, prompt.range(of: "password:", options: .caseInsensitive) != nil {
+            Self.send(password, to: client)
+        }
+    }
+
+    private func readRequest(from client: Int32) -> String? {
         var request = Data()
-        var byte: UInt8 = 0
-        while request.count <= 64 {
-            guard Darwin.read(client, &byte, 1) == 1 else { return }
-            if byte == 10 { break }
-            request.append(byte)
+        var buffer = [UInt8](repeating: 0, count: 1024)
+        while request.count < 16_384 {
+            let count = Darwin.read(client, &buffer, buffer.count)
+            guard count > 0 else { return nil }
+            let received = buffer.prefix(count)
+            if let end = received.firstIndex(of: 0) {
+                request.append(contentsOf: received[..<end])
+                return String(data: request, encoding: .utf8)
+            }
+            request.append(contentsOf: received)
         }
-        guard let text = String(data: request, encoding: .utf8) else { return }
-        let parts = text.split(separator: " ")
-        guard parts.count == 2, parts[0] == token, let parentID = Int32(parts[1]) else { return }
+        return nil
+    }
+
+    private func isAuthorized(_ parentID: Int32, waitForLaunch: Bool = false) -> Bool {
         lock.lock()
-        let deadline = Date(timeIntervalSinceNow: 2)
-        while sshProcessID == nil && !stopped {
-            if !lock.wait(until: deadline) { break }
+        defer { lock.unlock() }
+        if waitForLaunch {
+            let deadline = Date(timeIntervalSinceNow: 2)
+            while sshProcessID == nil && !stopped {
+                if !lock.wait(until: deadline) { break }
+            }
         }
-        let canRespond = !stopped && sshProcessID == parentID
-        lock.unlock()
-        guard canRespond else { return }
-        password.withUnsafeBytes { bytes in
+        return !stopped && sshProcessID == parentID
+    }
+
+    private static func send(_ response: Data, to client: Int32) {
+        response.withUnsafeBytes { bytes in
             guard let base = bytes.baseAddress else { return }
             var sent = 0
             while sent < bytes.count {

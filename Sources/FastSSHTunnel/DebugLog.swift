@@ -11,7 +11,7 @@ final class DebugLog {
 
     enum Event {
         case started, validationFailed, connecting, connected, disconnected
-        case passwordSetupFailed, sshLaunchFailed, trafficFailed
+        case sshPromptSetupFailed, sshLaunchFailed, trafficFailed
         case sshExited(Int32), sshDiagnostic(SSHDiagnostic)
         case firefoxNotFound, firefoxOpened, firefoxFailed
 
@@ -22,7 +22,7 @@ final class DebugLog {
             case .connecting: "Starting SSH tunnel"
             case .connected: "SSH tunnel connected"
             case .disconnected: "SSH tunnel stopped"
-            case .passwordSetupFailed: "Could not prepare password authentication"
+            case .sshPromptSetupFailed: "Could not prepare SSH prompts"
             case .sshLaunchFailed: "Could not start SSH process"
             case .trafficFailed: "Traffic monitoring failed"
             case .sshExited(let status): "SSH process exited with status \(status)"

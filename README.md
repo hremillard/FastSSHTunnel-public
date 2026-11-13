@@ -42,6 +42,8 @@ public IP is not saved in preferences. Xcode previews use a sample address.
 Closing the window keeps the app and its tunnels running. Click the Dock icon
 to bring the window back, including when it is minimized. You can also use
 **Window → Show FastSSHTunnel** (**⌘0**).
+Use **Quit FastSSHTunnel** (**⌘Q**) to stop all active tunnels and close their
+forwarded ports.
 
 ## Run it
 
@@ -113,20 +115,20 @@ destination. Deleting a connection also removes its saved Keychain password.
 To connect without a password, select an SSH identity file in the app. Each
 profile requires either a password or a selected SSH key to connect.
 
-First connections automatically accept and save new SSH host keys using
-OpenSSH's `StrictHostKeyChecking=accept-new`. This handles the authenticity
-confirmation without typing `yes`. Keys for previously known hosts must still
-match; changed host keys block the connection.
+For a new SSH server, the app shows its host key fingerprint before authenticating
+to that server. Compare it with a fingerprint from your server administrator,
+then choose **Trust and Connect** to save the key in OpenSSH's known hosts and
+continue. **Cancel** stops the connection. OpenSSH rejects changed host keys.
 
-Password connections use OpenSSH's `SSH_ASKPASS` mechanism with a protected
-local Unix socket. The password is never placed in process arguments,
-environment variables, helper files, or connection preferences. The helper
-only answers password prompts; host-key confirmations, key passphrases, and
-other challenges are not answered automatically. The server must support
-password authentication (or a keyboard-interactive password prompt).
-Key-based connections continue to use `BatchMode=yes`.
-For `ProxyJump` connections, authenticate jump hosts separately using keys or
-ssh-agent. The saved destination password is not supplied to jump hosts.
+The app uses OpenSSH's `SSH_ASKPASS` mechanism with a protected local Unix
+socket for host key confirmation and password prompts. The password is never
+placed in process arguments, environment variables, helper files, or connection
+preferences. The server must support password authentication or a
+keyboard-interactive password prompt to use a saved password. Key-based tunnel
+connections use keys or ssh-agent and continue without password or key
+passphrase prompts.
+For `ProxyJump` connections, verify jump host keys separately and authenticate
+using keys or ssh-agent. The saved destination password is not supplied to jump hosts.
 
 ## Firefox behavior
 
@@ -140,8 +142,9 @@ then click **Open SSH in Terminal**. The device settings are saved with the
 tunnel, so you can change them to connect to other devices.
 
 Terminal opens an interactive SSH session through the connected tunnel's
-SOCKS5 proxy. Enter the device's password or key passphrase in Terminal;
-default local SSH keys and ssh-agent are also supported. The tunnel server's
+SOCKS5 proxy. Terminal asks you to verify an unfamiliar device fingerprint
+before you enter its password or key passphrase. Default local SSH keys and
+ssh-agent are also supported. The tunnel server's
 password is not reused for the device. This session uses the literal device
 address and ignores `~/.ssh/config` so configured proxies or shared connections
 cannot bypass the selected tunnel. Keep the tunnel connected while using SSH.

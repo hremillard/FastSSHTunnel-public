@@ -46,7 +46,7 @@ enum SSHDeviceConfiguration {
             "-F", "/dev/null", "-tt",
             "-p", String(device.port),
             "-o", "ProxyCommand=/usr/bin/nc -X 5 -x 127.0.0.1:\(socksPort) '%h' '%p'",
-            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "StrictHostKeyChecking=ask",
             "-o", "ConnectTimeout=15",
             "-o", "ServerAliveInterval=30",
             "-o", "ServerAliveCountMax=3",
@@ -59,6 +59,7 @@ enum SSHDeviceConfiguration {
         return """
         #!/bin/sh
         /bin/rm -f -- "$0"
+        export SSH_ASKPASS_REQUIRE=never
         exec /usr/bin/ssh \(arguments.map(shellQuote).joined(separator: " "))
 
         """
